@@ -1,22 +1,19 @@
 use crate::codex::Session;
 use crate::config_types::ReasoningEffort as ReasoningEffortConfig;
 use crate::config_types::ReasoningSummary as ReasoningSummaryConfig;
-use crate::config_types::SandboxMode;
+use crate::environment_context::ENVIRONMENT_CONTEXT_START;
+use crate::environment_context::EnvironmentContext;
 use crate::error::Result;
 use crate::model_family::ModelFamily;
 use crate::models::ContentItem;
 use crate::models::ResponseItem;
 use crate::openai_tools::OpenAiTool;
-use crate::protocol::AskForApproval;
-use crate::protocol::SandboxPolicy;
 use crate::protocol::TokenUsage;
 use codex_apply_patch::APPLY_PATCH_TOOL_INSTRUCTIONS;
 use futures::Stream;
 use serde::Deserialize;
 use serde::Serialize;
 use std::borrow::Cow;
-use std::fmt::Display;
-use std::path::PathBuf;
 use std::pin::Pin;
 use std::task::Context;
 use std::task::Poll;
@@ -30,62 +27,6 @@ const BASE_INSTRUCTIONS: &str = include_str!("../prompt.md");
 /// wraps user instructions message in a tag for the model to parse more easily.
 const USER_INSTRUCTIONS_START: &str = "<user_instructions>\n\n";
 const USER_INSTRUCTIONS_END: &str = "\n\n</user_instructions>";
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, DeriveDisplay)]
-#[serde(rename_all = "kebab-case")]
-#[strum(serialize_all = "snake_case")]
-pub enum NetworkAccess {
-    Restricted,
-    Enabled,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename = "environment_context", rename_all = "snake_case")]
-pub(crate) struct EnvironmentContext {
-    pub cwd: PathBuf,
-    pub approval_policy: AskForApproval,
-    pub sandbox_mode: SandboxMode,
-    pub network_access: NetworkAccess,
-}
-
-impl Display for EnvironmentContext {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        writeln!(
-            f,
-            "Current working directory: {}",
-            self.cwd.to_string_lossy()
-        )?;
-        writeln!(f, "Approval policy: {}", self.approval_policy)?;
-        writeln!(f, "Sandbox mode: {}", self.sandbox_mode)?;
-        writeln!(f, "Network access: {}", self.network_access)?;
-        Ok(())
-    }
-}
-
-impl From<&Session> for EnvironmentContext {
-    fn from(sess: &Session) -> Self {
-        EnvironmentContext {
-            cwd: sess.cwd.clone(),
-            approval_policy: sess.approval_policy,
-            sandbox_mode: match sess.sandbox_policy.clone() {
-                SandboxPolicy::DangerFullAccess => SandboxMode::DangerFullAccess,
-                SandboxPolicy::ReadOnly => SandboxMode::ReadOnly,
-                SandboxPolicy::WorkspaceWrite { .. } => SandboxMode::WorkspaceWrite,
-            },
-            network_access: match sess.sandbox_policy.clone() {
-                SandboxPolicy::DangerFullAccess => NetworkAccess::Enabled,
-                SandboxPolicy::ReadOnly => NetworkAccess::Restricted,
-                SandboxPolicy::WorkspaceWrite { network_access, .. } => {
-                    if network_access {
-                        NetworkAccess::Enabled
-                    } else {
-                        NetworkAccess::Restricted
-                    }
-                }
-            },
-        }
-    }
-}
 
 /// API request payload for a single model turn.
 #[derive(Default, Debug, Clone)]
@@ -123,41 +64,44 @@ impl Prompt {
         Cow::Owned(sections.join("\n"))
     }
 
-    fn get_formatted_user_instructions(&self) -> Option<String> {
-        self.user_instructions
-            .as_ref()
-            .map(|ui| format!("{USER_INSTRUCTIONS_START}{ui}{USER_INSTRUCTIONS_END}"))
-    }
-
-    fn get_formatted_environment_context(&self) -> Option<String> {
-        let ec = self.environment_context.as_ref()?;
-        let mut buffer = String::new();
-        let mut ser = quick_xml::se::Serializer::new(&mut buffer);
-        ser.indent(' ', 2);
-        if let Err(err) = ec.serialize(ser) {
-            tracing::error!("Error serializing environment context: {err}");
-        }
-        Some(buffer)
-    }
-
     pub(crate) fn get_formatted_input(&self) -> Vec<ResponseItem> {
-        let mut input_with_instructions = Vec::with_capacity(self.input.len() + 2);
-        if let Some(ec) = self.get_formatted_environment_context() {
-            input_with_instructions.push(ResponseItem::Message {
-                id: None,
-                role: "user".to_string(),
-                content: vec![ContentItem::InputText { text: ec }],
-            });
+        // previously, we would inject user_instructions and environment_context
+        // here, but now we do that in the codex.rs file. To avoid breaking old rollouts,
+        // we still check if the input starts with the user_instructions and environment_context
+        // tags. If not, we inject them here.
+        let mut input = self.input.clone();
+        if let Some(user_instructions) = &self.user_instructions {
+            if !input
+                .iter()
+                .any(|item| does_message_start_with_tag(item, USER_INSTRUCTIONS_START))
+            {
+                input.insert(0, Self::make_user_instructions_message(user_instructions));
+            }
         }
-        if let Some(ui) = self.get_formatted_user_instructions() {
-            input_with_instructions.push(ResponseItem::Message {
-                id: None,
-                role: "user".to_string(),
-                content: vec![ContentItem::InputText { text: ui }],
-            });
+        if let Some(environment_context) = &self.environment_context {
+            if !input
+                .iter()
+                .any(|item| does_message_start_with_tag(item, ENVIRONMENT_CONTEXT_START))
+            {
+                input.insert(0, environment_context.clone().into());
+            }
         }
-        input_with_instructions.extend(self.input.clone());
-        input_with_instructions
+
+        input
+    }
+
+    pub(crate) fn format_user_instructions(ui: &str) -> String {
+        format!("{USER_INSTRUCTIONS_START}{ui}{USER_INSTRUCTIONS_END}")
+    }
+
+    pub(crate) fn make_user_instructions_message(ui: &str) -> ResponseItem {
+        ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: Self::format_user_instructions(ui),
+            }],
+        }
     }
 }
 
@@ -274,6 +218,24 @@ impl Stream for ResponseStream {
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         self.rx_event.poll_recv(cx)
+    }
+}
+
+fn does_message_start_with_tag(message: &ResponseItem, tag: &str) -> bool {
+    match message {
+        ResponseItem::Message { content, .. } => {
+            if !content.is_empty() {
+                match &content[0] {
+                    ContentItem::InputText { text } => text.starts_with(tag),
+                    // only match input text
+                    _ => false,
+                }
+            } else {
+                false
+            }
+        }
+        // only match message type
+        _ => false,
     }
 }
 

@@ -42,6 +42,7 @@ use crate::client_common::ResponseEvent;
 use crate::config::Config;
 use crate::config_types::ShellEnvironmentPolicy;
 use crate::conversation_history::ConversationHistory;
+use crate::environment_context::EnvironmentContext;
 use crate::error::CodexErr;
 use crate::error::Result as CodexResult;
 use crate::error::SandboxErr;
@@ -902,6 +903,21 @@ async fn submission_loop(
                     }
                 }
 
+                // Record stable user instructions once, and the initial environment
+                // context snapshot as regular user messages so payload building
+                // reads from history rather than injecting on each request.
+                if let Some(sess_arc) = &sess {
+                    // User instructions are stable; record once per session config.
+                    if let Some(ui) = sess_arc.user_instructions.clone() {
+                        let msg = Prompt::make_user_instructions_message(&ui);
+                        sess_arc.record_conversation_items(&[msg]).await;
+                    }
+
+                    // Always record an initial environment context snapshot.
+                    let ec_msg: ResponseItem = EnvironmentContext::from(sess_arc.as_ref()).into();
+                    sess_arc.record_conversation_items(&[ec_msg]).await;
+                }
+
                 // Gather history metadata for SessionConfiguredEvent.
                 let (history_log_id, history_entry_count) =
                     crate::message_history::history_metadata(&config).await;
@@ -1281,7 +1297,7 @@ async fn run_turn(
         store: !sess.disable_response_storage,
         tools,
         base_instructions_override: sess.base_instructions.clone(),
-        environment_context: Some(sess.into()),
+        environment_context: Some(EnvironmentContext::from(sess)),
     };
 
     let mut retries = 0;
