@@ -65,29 +65,7 @@ impl Prompt {
     }
 
     pub(crate) fn get_formatted_input(&self) -> Vec<ResponseItem> {
-        // previously, we would inject user_instructions and environment_context
-        // here, but now we do that in the codex.rs file. To avoid breaking old rollouts,
-        // we still check if the input starts with the user_instructions and environment_context
-        // tags. If not, we inject them here.
-        let mut input = self.input.clone();
-        if let Some(user_instructions) = &self.user_instructions {
-            if !input
-                .iter()
-                .any(|item| does_message_start_with_tag(item, USER_INSTRUCTIONS_START))
-            {
-                input.insert(0, Self::make_user_instructions_message(user_instructions));
-            }
-        }
-        if let Some(environment_context) = &self.environment_context {
-            if !input
-                .iter()
-                .any(|item| does_message_start_with_tag(item, ENVIRONMENT_CONTEXT_START))
-            {
-                input.insert(0, environment_context.clone().into());
-            }
-        }
-
-        input
+        self.input.clone()
     }
 
     pub(crate) fn format_user_instructions(ui: &str) -> String {
@@ -218,24 +196,6 @@ impl Stream for ResponseStream {
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         self.rx_event.poll_recv(cx)
-    }
-}
-
-fn does_message_start_with_tag(message: &ResponseItem, tag: &str) -> bool {
-    match message {
-        ResponseItem::Message { content, .. } => {
-            if !content.is_empty() {
-                match &content[0] {
-                    ContentItem::InputText { text } => text.starts_with(tag),
-                    // only match input text
-                    _ => false,
-                }
-            } else {
-                false
-            }
-        }
-        // only match message type
-        _ => false,
     }
 }
 

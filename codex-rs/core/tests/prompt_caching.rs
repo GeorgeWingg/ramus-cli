@@ -116,7 +116,7 @@ async fn prefixes_context_and_instructions_once_and_consistently_across_requests
     let body1 = requests[0].body_json::<serde_json::Value>().unwrap();
     assert_eq!(
         body1["input"],
-        serde_json::json!([expected_env_msg, expected_ui_msg, expected_user_message_1])
+        serde_json::json!([expected_ui_msg, expected_env_msg, expected_user_message_1])
     );
 
     let expected_user_message_2 = serde_json::json!({
