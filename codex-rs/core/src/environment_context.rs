@@ -11,10 +11,6 @@ use crate::protocol::SandboxPolicy;
 use std::fmt::Display;
 use std::path::PathBuf;
 
-/// wraps environment context message in a tag for the model to parse more easily.
-pub(crate) const ENVIRONMENT_CONTEXT_START: &str = "<environment_context>\n\n";
-pub(crate) const ENVIRONMENT_CONTEXT_END: &str = "\n\n</environment_context>";
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, DeriveDisplay)]
 #[serde(rename_all = "kebab-case")]
 #[strum(serialize_all = "snake_case")]

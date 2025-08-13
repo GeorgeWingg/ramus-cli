@@ -1,7 +1,6 @@
 use crate::codex::Session;
 use crate::config_types::ReasoningEffort as ReasoningEffortConfig;
 use crate::config_types::ReasoningSummary as ReasoningSummaryConfig;
-use crate::environment_context::ENVIRONMENT_CONTEXT_START;
 use crate::environment_context::EnvironmentContext;
 use crate::error::Result;
 use crate::model_family::ModelFamily;
@@ -28,20 +27,19 @@ const BASE_INSTRUCTIONS: &str = include_str!("../prompt.md");
 const USER_INSTRUCTIONS_START: &str = "<user_instructions>\n\n";
 const USER_INSTRUCTIONS_END: &str = "\n\n</user_instructions>";
 
-/// API request payload for a single model turn.
+/// wraps environment context message in a tag for the model to parse more easily.
+pub(crate) const ENVIRONMENT_CONTEXT_START: &str = "<environment_context>\n\n";
+pub(crate) const ENVIRONMENT_CONTEXT_END: &str = "\n\n</environment_context>";
+
+/// API request payload for a single model turn. Also contains formatting logic for
+/// various messages within the conversation, to keep the logic in one place
 #[derive(Default, Debug, Clone)]
 pub struct Prompt {
     /// Conversation context input items.
     pub input: Vec<ResponseItem>,
-    /// Optional instructions from the user to amend to the built-in agent
-    /// instructions.
-    pub user_instructions: Option<String>,
+
     /// Whether to store response on server side (disable_response_storage = !store).
     pub store: bool,
-
-    /// A list of key-value pairs that will be added as a developer message
-    /// for the model to use
-    pub environment_context: Option<EnvironmentContext>,
 
     /// Tools available to the model, including additional tools sourced from
     /// external MCP servers.
@@ -68,16 +66,24 @@ impl Prompt {
         self.input.clone()
     }
 
-    pub(crate) fn format_user_instructions(ui: &str) -> String {
-        format!("{USER_INSTRUCTIONS_START}{ui}{USER_INSTRUCTIONS_END}")
-    }
-
-    pub(crate) fn make_user_instructions_message(ui: &str) -> ResponseItem {
+    /// Creates a formatted environment context message from an EnvironmentContext.
+    pub(crate) fn format_environment_context_message(ec: &EnvironmentContext) -> ResponseItem {
         ResponseItem::Message {
             id: None,
             role: "user".to_string(),
             content: vec![ContentItem::InputText {
-                text: Self::format_user_instructions(ui),
+                text: format!("{ENVIRONMENT_CONTEXT_START}{ec}{ENVIRONMENT_CONTEXT_END}"),
+            }],
+        }
+    }
+
+    /// Creates a formatted user instructions message from a string
+    pub(crate) fn format_user_instructions_message(ui: &str) -> ResponseItem {
+        ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: format!("{USER_INSTRUCTIONS_START}{ui}{USER_INSTRUCTIONS_END}"),
             }],
         }
     }
@@ -209,7 +215,6 @@ mod tests {
     #[test]
     fn get_full_instructions_no_user_content() {
         let prompt = Prompt {
-            user_instructions: Some("custom instruction".to_string()),
             ..Default::default()
         };
         let expected = format!("{BASE_INSTRUCTIONS}\n{APPLY_PATCH_TOOL_INSTRUCTIONS}");

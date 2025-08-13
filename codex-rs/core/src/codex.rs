@@ -909,12 +909,14 @@ async fn submission_loop(
                 if let Some(sess_arc) = &sess {
                     // User instructions are stable; record once per session config.
                     if let Some(ui) = sess_arc.user_instructions.clone() {
-                        let msg = Prompt::make_user_instructions_message(&ui);
+                        let msg = Prompt::format_user_instructions_message(&ui);
                         sess_arc.record_conversation_items(&[msg]).await;
                     }
 
                     // Always record an initial environment context snapshot.
-                    let ec_msg: ResponseItem = EnvironmentContext::from(sess_arc.as_ref()).into();
+                    let ec_msg = Prompt::format_environment_context_message(
+                        &EnvironmentContext::from(sess_arc.as_ref()),
+                    );
                     sess_arc.record_conversation_items(&[ec_msg]).await;
                 }
 
@@ -1293,11 +1295,9 @@ async fn run_turn(
 
     let prompt = Prompt {
         input,
-        user_instructions: sess.user_instructions.clone(),
         store: !sess.disable_response_storage,
         tools,
         base_instructions_override: sess.base_instructions.clone(),
-        environment_context: Some(EnvironmentContext::from(sess)),
     };
 
     let mut retries = 0;
@@ -1531,9 +1531,7 @@ async fn run_compact_task(
 
     let prompt = Prompt {
         input: turn_input,
-        user_instructions: None,
         store: !sess.disable_response_storage,
-        environment_context: None,
         tools: Vec::new(),
         base_instructions_override: Some(compact_instructions.clone()),
     };
