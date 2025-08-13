@@ -1,3 +1,4 @@
+use crate::codex::Session;
 use crate::config_types::ReasoningEffort as ReasoningEffortConfig;
 use crate::config_types::ReasoningSummary as ReasoningSummaryConfig;
 use crate::error::Result;
@@ -10,6 +11,7 @@ use crate::protocol::SandboxPolicy;
 use crate::protocol::TokenUsage;
 use codex_apply_patch::APPLY_PATCH_TOOL_INSTRUCTIONS;
 use futures::Stream;
+use serde::Deserialize;
 use serde::Serialize;
 use std::borrow::Cow;
 use std::fmt::Display;
@@ -23,19 +25,24 @@ use tokio::sync::mpsc;
 /// with this content.
 const BASE_INSTRUCTIONS: &str = include_str!("../prompt.md");
 
-/// wraps environment context message in a tag for the model to parse more easily.
-const ENVIRONMENT_CONTEXT_START: &str = "<environment_context>\n\n";
-const ENVIRONMENT_CONTEXT_END: &str = "\n\n</environment_context>";
-
 /// wraps user instructions message in a tag for the model to parse more easily.
 const USER_INSTRUCTIONS_START: &str = "<user_instructions>\n\n";
 const USER_INSTRUCTIONS_END: &str = "\n\n</user_instructions>";
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum NetworkAccess {
+    Restricted,
+    Enabled,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename = "environment_context", rename_all = "snake_case")]
 pub(crate) struct EnvironmentContext {
     pub cwd: PathBuf,
     pub approval_policy: AskForApproval,
     pub sandbox_policy: SandboxPolicy,
+    pub network_access: NetworkAccess,
 }
 
 impl Display for EnvironmentContext {
@@ -61,6 +68,27 @@ impl Display for EnvironmentContext {
         };
         writeln!(f, "Network access: {network_access}")?;
         Ok(())
+    }
+}
+
+impl From<&Session> for EnvironmentContext {
+    fn from(sess: &Session) -> Self {
+        EnvironmentContext {
+            cwd: sess.cwd.clone(),
+            approval_policy: sess.approval_policy,
+            sandbox_policy: sess.sandbox_policy.clone(),
+            network_access: match sess.sandbox_policy.clone() {
+                SandboxPolicy::DangerFullAccess => NetworkAccess::Enabled,
+                SandboxPolicy::ReadOnly => NetworkAccess::Restricted,
+                SandboxPolicy::WorkspaceWrite { network_access, .. } => {
+                    if network_access {
+                        NetworkAccess::Enabled
+                    } else {
+                        NetworkAccess::Restricted
+                    }
+                }
+            },
+        }
     }
 }
 
@@ -107,9 +135,12 @@ impl Prompt {
     }
 
     fn get_formatted_environment_context(&self) -> Option<String> {
-        self.environment_context
-            .as_ref()
-            .map(|ec| format!("{ENVIRONMENT_CONTEXT_START}{ec}{ENVIRONMENT_CONTEXT_END}"))
+        let ec = self.environment_context.as_ref()?;
+        let mut buffer = String::new();
+        let mut ser = quick_xml::se::Serializer::new(&mut buffer);
+        ser.indent(' ', 2);
+        ec.serialize(ser).ok()?;
+        Some(buffer)
     }
 
     pub(crate) fn get_formatted_input(&self) -> Vec<ResponseItem> {

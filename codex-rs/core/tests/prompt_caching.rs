@@ -88,7 +88,7 @@ async fn prefixes_context_and_instructions_once_and_consistently_across_requests
     assert_eq!(requests.len(), 2, "expected two POST requests");
 
     let expected_env_text = format!(
-        "<environment_context>\n\nCurrent working directory: {}\nApproval policy: on-request\nSandbox policy: read-only\nNetwork access: restricted\n\n\n</environment_context>",
+        "<environment_context>\n  <cwd>{}</cwd>\n  <approval_policy>on-request</approval_policy>\n  <sandbox_policy>\n    <mode>read-only</mode>\n  </sandbox_policy>\n  <network_access>restricted</network_access>\n</environment_context>",
         cwd.path().to_string_lossy()
     );
     let expected_ui_text =

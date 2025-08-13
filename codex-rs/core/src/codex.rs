@@ -37,7 +37,6 @@ use crate::apply_patch::convert_apply_patch_to_protocol;
 use crate::apply_patch::get_writable_roots;
 use crate::apply_patch::{self};
 use crate::client::ModelClient;
-use crate::client_common::EnvironmentContext;
 use crate::client_common::Prompt;
 use crate::client_common::ResponseEvent;
 use crate::config::Config;
@@ -219,7 +218,7 @@ pub(crate) struct Session {
     base_instructions: Option<String>,
     user_instructions: Option<String>,
     pub(crate) approval_policy: AskForApproval,
-    sandbox_policy: SandboxPolicy,
+    pub(crate) sandbox_policy: SandboxPolicy,
     shell_environment_policy: ShellEnvironmentPolicy,
     pub(crate) writable_roots: Mutex<Vec<PathBuf>>,
     disable_response_storage: bool,
@@ -1282,11 +1281,7 @@ async fn run_turn(
         store: !sess.disable_response_storage,
         tools,
         base_instructions_override: sess.base_instructions.clone(),
-        environment_context: Some(EnvironmentContext {
-            cwd: sess.cwd.clone(),
-            approval_policy: sess.approval_policy,
-            sandbox_policy: sess.sandbox_policy.clone(),
-        }),
+        environment_context: Some(sess.into()),
     };
 
     let mut retries = 0;
