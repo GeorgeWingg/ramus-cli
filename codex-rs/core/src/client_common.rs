@@ -20,7 +20,7 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::task::Context;
 use std::task::Poll;
-use strum_macros::Display;
+use strum_macros::Display as DeriveDisplay;
 use tokio::sync::mpsc;
 
 /// The `instructions` field in the payload sent to a model should always start
@@ -31,8 +31,9 @@ const BASE_INSTRUCTIONS: &str = include_str!("../prompt.md");
 const USER_INSTRUCTIONS_START: &str = "<user_instructions>\n\n";
 const USER_INSTRUCTIONS_END: &str = "\n\n</user_instructions>";
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Display)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, DeriveDisplay)]
+#[serde(rename_all = "kebab-case")]
+#[strum(serialize_all = "snake_case")]
 pub enum NetworkAccess {
     Restricted,
     Enabled,
@@ -133,7 +134,9 @@ impl Prompt {
         let mut buffer = String::new();
         let mut ser = quick_xml::se::Serializer::new(&mut buffer);
         ser.indent(' ', 2);
-        ec.serialize(ser).ok()?;
+        if let Err(err) = ec.serialize(ser) {
+            tracing::error!("Error serializing environment context: {err}");
+        }
         Some(buffer)
     }
 
