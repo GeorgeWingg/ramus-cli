@@ -63,6 +63,34 @@ pub struct Cli {
     #[arg(long = "output-last-message")]
     pub last_message_file: Option<PathBuf>,
 
+    /// Webhook endpoint for plan updates
+    #[arg(long = "plan-webhook", env = "RAMUS_WEBHOOK_URL", value_parser = validate_url)]
+    pub plan_webhook: Option<String>,
+
+    /// HMAC signing secret for webhooks
+    #[arg(long = "webhook-secret", env = "RAMUS_WEBHOOK_SECRET")]
+    pub webhook_secret: Option<String>,
+
+    /// Path for event log file (JSONL format)
+    #[arg(long = "plan-events")]
+    pub plan_events: Option<PathBuf>,
+
+    /// Path for current plan state (JSON)
+    #[arg(long = "plan-state")]
+    pub plan_state: Option<PathBuf>,
+
+    /// Unique task identifier
+    #[arg(long = "task-id")]
+    pub task_id: Option<String>,
+
+    /// Unique run identifier  
+    #[arg(long = "run-id")]
+    pub run_id: Option<String>,
+
+    /// Enable plan events to stdout
+    #[arg(long = "emit-plan-stdout")]
+    pub emit_plan_stdout: bool,
+
     /// Initial instructions for the agent. If not provided as an argument (or
     /// if `-` is used), instructions are read from stdin.
     #[arg(value_name = "PROMPT")]
@@ -76,4 +104,12 @@ pub enum Color {
     Never,
     #[default]
     Auto,
+}
+
+fn validate_url(s: &str) -> Result<String, String> {
+    let url = url::Url::parse(s).map_err(|e| e.to_string())?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err("URL must use http or https scheme".to_string());
+    }
+    Ok(s.to_string())
 }

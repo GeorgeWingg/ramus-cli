@@ -2,6 +2,7 @@ mod cli;
 mod event_processor;
 mod event_processor_with_human_output;
 mod event_processor_with_json_output;
+mod plan_emitter;
 
 use std::io::IsTerminal;
 use std::io::Read;
@@ -24,13 +25,12 @@ use codex_core::util::is_inside_git_repo;
 use codex_ollama::DEFAULT_OSS_MODEL;
 use event_processor_with_human_output::EventProcessorWithHumanOutput;
 use event_processor_with_json_output::EventProcessorWithJsonOutput;
-use tracing::debug;
-use tracing::error;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
 use crate::event_processor::CodexStatus;
 use crate::event_processor::EventProcessor;
+use crate::plan_emitter::PlanEmitter;
 
 pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> anyhow::Result<()> {
     let Cli {
@@ -46,6 +46,13 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
         last_message_file,
         json: json_mode,
         sandbox_mode: sandbox_mode_cli_arg,
+        plan_webhook,
+        webhook_secret,
+        plan_events,
+        plan_state,
+        task_id,
+        run_id,
+        emit_plan_stdout,
         prompt,
         config_overrides,
     } = cli;
@@ -175,6 +182,30 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
             .map_err(|e| anyhow::anyhow!("OSS setup failed: {e}"))?;
     }
 
+    // Create plan emitter if any plan-related options are provided
+    let plan_emitter = if plan_webhook.is_some()
+        || plan_events.is_some()
+        || plan_state.is_some()
+        || emit_plan_stdout
+    {
+        // Generate default IDs if not provided
+        let task_id = task_id.unwrap_or_else(|| format!("task-{}", uuid::Uuid::new_v4()));
+        let run_id = run_id.unwrap_or_else(|| format!("run-{}", uuid::Uuid::new_v4()));
+
+        Some(PlanEmitter::new(
+            plan_webhook,
+            webhook_secret,
+            plan_events.clone(),
+            plan_state.clone(),
+            task_id,
+            run_id,
+            emit_plan_stdout,
+            json_mode,
+        )?)
+    } else {
+        None
+    };
+
     // Print the effective configuration and prompt so users can see what Codex
     // is using.
     event_processor.print_config_summary(&config, &prompt);
@@ -192,14 +223,41 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
     } = conversation_manager.new_conversation(config).await?;
     info!("Codex initialized with event: {session_configured:?}");
 
+    // Load initial sequence number if plan emitter is configured
+    let sequence_number = if let Some(ref emitter) = plan_emitter {
+        emitter.load_sequence().await.unwrap_or(1)
+    } else {
+        1
+    };
+
+    // Create parent directories for plan files if needed
+    if let Some(ref path) = plan_events {
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+    }
+    if let Some(ref path) = plan_state {
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+    }
+
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Event>();
     {
         let conversation = conversation.clone();
+        let plan_emitter_clone = plan_emitter.clone();
         tokio::spawn(async move {
+            let mut seq = sequence_number;
             loop {
                 tokio::select! {
                     _ = tokio::signal::ctrl_c() => {
-                        tracing::debug!("Keyboard interrupt");
+                        tracing::debug!("Keyboard interrupt (SIGINT)");
+                        // Emit shutdown event if plan emitter is configured
+                        if let Some(ref emitter) = plan_emitter_clone {
+                            if let Err(e) = emitter.emit_shutdown(seq).await {
+                                tracing::error!("Failed to emit shutdown event: {}", e);
+                            }
+                        }
                         // Immediately notify Codex to abort any in‑flight task.
                         conversation.submit(Op::Interrupt).await.ok();
 
@@ -207,13 +265,57 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
                         // will emit a `TurnInterrupted` (Error) event which is drained later.
                         break;
                     }
+                    _ = async {
+                        #[cfg(unix)]
+                        {
+                            let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).unwrap();
+                            sigterm.recv().await
+                        }
+                        #[cfg(not(unix))]
+                        {
+                            // On non-Unix systems, create a future that never resolves
+                            std::future::pending::<()>().await
+                        }
+                    } => {
+                        tracing::debug!("Termination signal (SIGTERM)");
+                        // Emit shutdown event if plan emitter is configured
+                        if let Some(ref emitter) = plan_emitter_clone {
+                            if let Err(e) = emitter.emit_shutdown(seq).await {
+                                tracing::error!("Failed to emit shutdown event: {}", e);
+                            }
+                        }
+                        // Immediately notify Codex to abort any in‑flight task.
+                        conversation.submit(Op::Interrupt).await.ok();
+
+                        // Exit the inner loop and return to the main input prompt.
+                        break;
+                    }
                     res = conversation.next_event() => match res {
                         Ok(event) => {
-                            debug!("Received event: {event:?}");
+                            tracing::debug!("Received event: {event:?}");
+
+                            // Handle plan update events
+                            if let EventMsg::PlanUpdate(ref plan_args) = event.msg {
+                                if let Some(ref emitter) = plan_emitter_clone {
+                                    match emitter.emit_plan_update(plan_args, seq).await {
+                                        Ok(()) => {
+                                            // Only persist and increment sequence on successful emission
+                                            if let Err(e) = emitter.persist_sequence(seq).await {
+                                                tracing::error!("Failed to persist sequence: {}", e);
+                                            }
+                                            seq += 1;
+                                        }
+                                        Err(e) => {
+                                            tracing::error!("Failed to emit plan update (sequence {} not incremented): {}", seq, e);
+                                            // Note: sequence is NOT incremented on failure to maintain contiguous delivery
+                                        }
+                                    }
+                                }
+                            }
 
                             let is_shutdown_complete = matches!(event.msg, EventMsg::ShutdownComplete);
                             if let Err(e) = tx.send(event) {
-                                error!("Error sending event: {e:?}");
+                                tracing::error!("Error sending event: {e:?}");
                                 break;
                             }
                             if is_shutdown_complete {
@@ -222,7 +324,7 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
                             }
                         },
                         Err(e) => {
-                            error!("Error receiving event: {e:?}");
+                            tracing::error!("Error receiving event: {e:?}");
                             break;
                         }
                     }
