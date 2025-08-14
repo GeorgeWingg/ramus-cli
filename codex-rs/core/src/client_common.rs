@@ -1,4 +1,3 @@
-use crate::codex::Session;
 use crate::config_types::ReasoningEffort as ReasoningEffortConfig;
 use crate::config_types::ReasoningSummary as ReasoningSummaryConfig;
 use crate::environment_context::EnvironmentContext;
@@ -10,13 +9,11 @@ use crate::openai_tools::OpenAiTool;
 use crate::protocol::TokenUsage;
 use codex_apply_patch::APPLY_PATCH_TOOL_INSTRUCTIONS;
 use futures::Stream;
-use serde::Deserialize;
 use serde::Serialize;
 use std::borrow::Cow;
 use std::pin::Pin;
 use std::task::Context;
 use std::task::Poll;
-use strum_macros::Display as DeriveDisplay;
 use tokio::sync::mpsc;
 
 /// The `instructions` field in the payload sent to a model should always start
