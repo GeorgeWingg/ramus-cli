@@ -903,9 +903,7 @@ async fn submission_loop(
                     }
                 }
 
-                // Record stable user instructions once, and the initial environment
-                // context snapshot as regular user messages so payload building
-                // reads from history rather than injecting on each request.
+                // Record user instructions and starting environment context.
                 if let Some(sess_arc) = &sess {
                     // User instructions are stable; record once per session config.
                     if let Some(ui) = sess_arc.user_instructions.clone() {
@@ -913,10 +911,7 @@ async fn submission_loop(
                         sess_arc.record_conversation_items(&[msg]).await;
                     }
 
-                    // Always record an initial environment context snapshot.
-                    let ec_msg = Prompt::format_environment_context_message(
-                        &EnvironmentContext::from(sess_arc.as_ref()),
-                    );
+                    let ec_msg: ResponseItem = EnvironmentContext::from(sess_arc.as_ref()).into();
                     sess_arc.record_conversation_items(&[ec_msg]).await;
                 }
 
