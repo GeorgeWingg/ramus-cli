@@ -53,6 +53,7 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
         task_id,
         run_id,
         emit_plan_stdout,
+        include_plan_tool,
         prompt,
         config_overrides,
     } = cli;
@@ -152,7 +153,7 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
         model_provider,
         codex_linux_sandbox_exe,
         base_instructions: None,
-        include_plan_tool: None,
+        include_plan_tool: Some(include_plan_tool),
         disable_response_storage: oss.then_some(true),
         show_raw_agent_reasoning: oss.then_some(true),
     };
@@ -199,6 +200,7 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
             plan_state.clone(),
             task_id,
             run_id,
+            config.model.clone(),
             emit_plan_stdout,
             json_mode,
         )?)
@@ -268,8 +270,14 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
                     _ = async {
                         #[cfg(unix)]
                         {
-                            let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).unwrap();
-                            sigterm.recv().await
+                            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+                                Ok(mut sigterm) => sigterm.recv().await,
+                                Err(e) => {
+                                    tracing::error!("Failed to install SIGTERM handler: {}", e);
+                                    // Create a future that never resolves to avoid spurious termination behavior.
+                                    std::future::pending::<Option<()>>().await
+                                }
+                            }
                         }
                         #[cfg(not(unix))]
                         {

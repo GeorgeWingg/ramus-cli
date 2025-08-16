@@ -45,12 +45,13 @@ pub struct PlanEmitter {
     plan_state_path: Option<PathBuf>,
     task_id: String,
     run_id: String,
+    model: String,
     emit_stdout: bool,
     json_mode: bool,
-    client: Client,
 }
 
 impl PlanEmitter {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         webhook_url: Option<String>,
         webhook_secret: Option<String>,
@@ -58,15 +59,10 @@ impl PlanEmitter {
         plan_state_path: Option<PathBuf>,
         task_id: String,
         run_id: String,
+        model: String,
         emit_stdout: bool,
         json_mode: bool,
     ) -> Result<Self> {
-        let client = Client::builder()
-            .connect_timeout(Duration::from_secs(1))
-            .timeout(Duration::from_secs(2))
-            .build()
-            .context("Failed to create HTTP client")?;
-
         Ok(Self {
             webhook_url,
             webhook_secret,
@@ -74,9 +70,9 @@ impl PlanEmitter {
             plan_state_path,
             task_id,
             run_id,
+            model,
             emit_stdout,
             json_mode,
-            client,
         })
     }
 
@@ -93,7 +89,7 @@ impl PlanEmitter {
             ts: OffsetDateTime::now_utc(),
             plan: plan.clone(),
             meta: EventMeta {
-                model: "codex".to_string(), // TODO: Get actual model from session config when available
+                model: self.model.clone(),
                 codex_ver: env!("CARGO_PKG_VERSION").to_string(), // Use build-time version
             },
         };
@@ -105,9 +101,9 @@ impl PlanEmitter {
 
             if self.json_mode {
                 // Emit to stderr to avoid corrupting JSON output stream
-                eprintln!("@plan {}", json_str);
+                eprintln!("@plan {json_str}");
             } else {
-                println!("@plan {}", json_str);
+                println!("@plan {json_str}");
             }
         }
 
@@ -195,7 +191,7 @@ impl PlanEmitter {
         let json_line =
             serde_json::to_string(envelope).context("Failed to serialize event for log")?;
 
-        let content = format!("{}\n", json_line);
+        let content = format!("{json_line}\n");
 
         // Append to file using OpenOptions
         use tokio::fs::OpenOptions;
@@ -289,12 +285,20 @@ impl PlanEmitter {
         Ok(())
     }
 
+    #[allow(unused_assignments)]
     async fn send_webhook(
         &self,
         url: &str,
         secret: &str,
         envelope: &PlanEventEnvelope,
     ) -> Result<()> {
+        // Build a short‑lived HTTP client per send to avoid initializing
+        // platform networking state in restricted test environments.
+        let client = Client::builder()
+            .connect_timeout(Duration::from_secs(1))
+            .timeout(Duration::from_secs(2))
+            .build()
+            .context("Failed to create HTTP client")?;
         let body =
             serde_json::to_string(envelope).context("Failed to serialize webhook payload")?;
 
@@ -304,7 +308,7 @@ impl PlanEmitter {
             .context("Failed to format timestamp")?;
 
         // Sign canonical string: "v0:{timestamp}:{body}"
-        let canonical_string = format!("v0:{}:{}", timestamp_str, body);
+        let canonical_string = format!("v0:{timestamp_str}:{body}");
         let signature = self.compute_hmac(secret, &canonical_string)?;
 
         // Use specific retry delays as per plan: 200ms, 500ms, 1s (3 total attempts)
@@ -319,14 +323,11 @@ impl PlanEmitter {
 
         // First attempt (no delay)
         match self
-            .try_webhook_request(url, &envelope, &timestamp_str, &signature, &body)
+            .try_webhook_request(&client, url, envelope, &timestamp_str, &signature, &body)
             .await
         {
             Ok(()) => {
-                info!(
-                    "Webhook delivered successfully on first attempt: seq={}",
-                    envelope.seq
-                );
+                info!("Webhook delivered successfully on first attempt: seq={}", envelope.seq);
                 return Ok(());
             }
             Err((status_opt, e, _retry_after)) => {
@@ -352,7 +353,7 @@ impl PlanEmitter {
             tokio::time::sleep(total_delay).await;
 
             match self
-                .try_webhook_request(url, &envelope, &timestamp_str, &signature, &body)
+                .try_webhook_request(&client, url, envelope, &timestamp_str, &signature, &body)
                 .await
             {
                 Ok(()) => {
@@ -376,10 +377,7 @@ impl PlanEmitter {
                         // If we got a Retry-After header, respect it for the next attempt
                         if let Some(retry_delay) = retry_after {
                             if attempt + 1 < retry_delays.len() {
-                                info!(
-                                    "Rate limited, respecting Retry-After: {}s",
-                                    retry_delay.as_secs()
-                                );
+                                info!("Rate limited, respecting Retry-After: {}s", retry_delay.as_secs());
                                 tokio::time::sleep(retry_delay).await;
                             }
                         }
@@ -440,22 +438,22 @@ impl PlanEmitter {
 
     async fn try_webhook_request(
         &self,
+        client: &Client,
         url: &str,
         envelope: &PlanEventEnvelope,
         timestamp_str: &str,
         signature: &str,
-        body: &String,
+        body: &str,
     ) -> Result<(), (Option<reqwest::StatusCode>, anyhow::Error, Option<Duration>)> {
-        let response = self
-            .client
+        let response = client
             .post(url)
             .header("Content-Type", "application/json")
             .header("X-Run-Id", &self.run_id)
             .header("X-Task-Id", &self.task_id)
             .header("X-Seq", envelope.seq.to_string())
             .header("X-Timestamp", timestamp_str)
-            .header("X-Signature", format!("sha256={}", signature))
-            .body(body.clone())
+            .header("X-Signature", format!("sha256={signature}"))
+            .body(body.to_owned())
             .send()
             .await
             .map_err(|e| (None, anyhow::Error::from(e), None))?;
@@ -512,6 +510,7 @@ mod tests {
             Some(state_path),
             "task-123".to_string(),
             "run-456".to_string(),
+            "test-model".to_string(),
             false,
             false,
         )
@@ -539,6 +538,7 @@ mod tests {
             Some(state_path.clone()),
             "task-123".to_string(),
             "run-456".to_string(),
+            "test-model".to_string(),
             false,
             false,
         )
@@ -575,6 +575,7 @@ mod tests {
             None,
             "task-123".to_string(),
             "run-456".to_string(),
+            "test-model".to_string(),
             false,
             false,
         )
@@ -598,6 +599,7 @@ mod tests {
             None,
             "task-123".to_string(),
             "run-456".to_string(),
+            "test-model".to_string(),
             false,
             false,
         )
@@ -659,7 +661,7 @@ mod tests {
             .unwrap(),
             plan,
             meta: EventMeta {
-                model: "codex".to_string(),
+                model: "test-model".to_string(),
                 codex_ver: env!("CARGO_PKG_VERSION").to_string(),
             },
         };
@@ -690,7 +692,7 @@ mod tests {
         assert_eq!(plan_array[1]["status"], "pending");
 
         // Verify meta object
-        assert_eq!(json["meta"]["model"], "codex");
+        assert_eq!(json["meta"]["model"], "test-model");
         assert_eq!(json["meta"]["codex_ver"], env!("CARGO_PKG_VERSION"));
     }
 }
