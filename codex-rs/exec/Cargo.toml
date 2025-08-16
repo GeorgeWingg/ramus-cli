@@ -7,6 +7,10 @@ version = { workspace = true }
 name = "codex-exec"
 path = "src/main.rs"
 
+[[bin]]
+name = "ramus"
+path = "src/bin/ramus.rs"
+
 [lib]
 name = "codex_exec"
 path = "src/lib.rs"

@@ -91,6 +91,10 @@ pub struct Cli {
     #[arg(long = "emit-plan-stdout")]
     pub emit_plan_stdout: bool,
 
+    /// Include the experimental plan tool so the model can call `update_plan`.
+    #[arg(long = "include-plan-tool", default_value_t = false)]
+    pub include_plan_tool: bool,
+
     /// Initial instructions for the agent. If not provided as an argument (or
     /// if `-` is used), instructions are read from stdin.
     #[arg(value_name = "PROMPT")]
